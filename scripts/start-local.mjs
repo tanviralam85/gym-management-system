@@ -1,12 +1,71 @@
 import { spawn, execFileSync } from 'node:child_process';
+import { createHash, randomBytes } from 'node:crypto';
 import { once } from 'node:events';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createServer as createPortProbe } from 'node:net';
 import { resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { createServer as createViteServer } from 'vite';
 
 const host = '127.0.0.1';
+const databaseName = 'lion_gym_dev';
+const firstLoginFile = '.local/owner-first-login.txt';
+const prismaCli = 'node_modules/prisma/build/index.js';
+
+function runNode(args) {
+  execFileSync(process.execPath, args, { stdio: 'inherit' });
+}
+
+function prepareEnvironment(databaseDir) {
+  mkdirSync('.local', { recursive: true });
+  if (!existsSync('.env')) {
+    if (existsSync(resolve(databaseDir, 'PG_VERSION'))) {
+      throw new Error('Restore your original .env to reuse the existing local database.');
+    }
+    const password = randomBytes(24).toString('hex');
+    writeFileSync('.env', [
+      'API_PORT=3000',
+      'WEB_ORIGIN=http://127.0.0.1:5173',
+      `DATABASE_URL=postgresql://lion_local:${password}@127.0.0.1:25432/${databaseName}`,
+      '',
+    ].join('\n'), { flag: 'wx', mode: 0o600 });
+  }
+  process.loadEnvFile('.env');
+}
+
+function prepareDependencies() {
+  const fingerprint = createHash('sha256').update(readFileSync('package-lock.json')).digest('hex');
+  const installed = '.local/dependencies.sha256';
+  if (existsSync(installed) && readFileSync(installed, 'utf8') === fingerprint &&
+      ['vite', 'prisma', 'embedded-postgres'].every((name) => existsSync('node_modules/' + name + '/package.json'))) return;
+  if (!process.env.npm_execpath) throw new Error('Start from the repository root with npm run dev.');
+  console.log('Installing Lion Gym dependencies from the lockfile.');
+  runNode([process.env.npm_execpath, 'ci', '--include=dev', '--include=optional', '--no-audit', '--no-fund']);
+  writeFileSync(installed, fingerprint);
+}
+
+async function setupDatabase(pg) {
+  const maintenance = pg.getPgClient('postgres');
+  await maintenance.connect();
+  try {
+    const { rowCount } = await maintenance.query('SELECT 1 FROM pg_database WHERE datname = $1', [databaseName]);
+    if (!rowCount) await pg.createDatabase(databaseName);
+  } finally {
+    await maintenance.end();
+  }
+  runNode([prismaCli, 'migrate', 'deploy']);
+
+  const client = pg.getPgClient(databaseName);
+  await client.connect();
+  try {
+    const { rowCount } = await client.query(`SELECT 1 FROM "Account" WHERE role = 'OWNER' LIMIT 1`);
+    if (!rowCount) {
+      runNode(['dist/api/auth/bootstrap-owner.js', 'lion.owner', '--save-local-credentials']);
+      console.log(`First sign-in for lion.owner: open ${firstLoginFile} in VS Code.`);
+    }
+  } finally {
+    await client.end();
+  }
+}
 
 async function requireFreePort(port, name) {
   const probe = createPortProbe();
@@ -38,33 +97,36 @@ async function waitForApi(origin, api, signal) {
 
 async function start() {
   const databaseDir = resolve('.local/postgres-data');
-  const runtime = new URL('../.local/node_modules/embedded-postgres/dist/index.js', import.meta.url);
-  if (!process.env.DATABASE_URL || !existsSync(runtime) || !existsSync(resolve(databaseDir, 'PG_VERSION'))) {
-    throw new Error('The local PostgreSQL setup is missing. See the local setup section in README.md.');
-  }
-
+  prepareEnvironment(databaseDir);
+  if (!process.env.DATABASE_URL) throw new Error('Set DATABASE_URL in .env or use the generated local configuration.');
   const database = new URL(process.env.DATABASE_URL);
   const web = new URL(process.env.WEB_ORIGIN ?? 'http://127.0.0.1:5173');
   const databasePort = Number(database.port || 5432);
   const apiPort = Number(process.env.API_PORT ?? 3000);
   const webPort = Number(web.port || 80);
-  if (database.hostname !== host || web.hostname !== host || web.protocol !== 'http:' ||
+  if (database.hostname !== host || database.pathname !== '/' + databaseName ||
+      !['postgresql:', 'postgres:'].includes(database.protocol) || database.search || database.hash ||
+      !database.username || !database.password || web.hostname !== host || web.protocol !== 'http:' ||
       new Set([databasePort, apiPort, webPort]).size !== 3 ||
       ![databasePort, apiPort, webPort].every((port) => Number.isInteger(port) && port > 0 && port <= 65535)) {
-    throw new Error('The local launcher requires distinct database, API and web ports on 127.0.0.1.');
+    throw new Error('Use the local lion_gym_dev database and distinct ports on 127.0.0.1. For an external database, see README.md.');
   }
 
   await requireFreePort(databasePort, 'PostgreSQL');
   await requireFreePort(apiPort, 'API');
   await requireFreePort(webPort, 'Web');
-  execFileSync(process.execPath, ['node_modules/typescript/bin/tsc', '-p', 'api/tsconfig.json'], { stdio: 'inherit' });
+  prepareDependencies();
+  runNode([prismaCli, 'generate']);
+  runNode(['node_modules/typescript/bin/tsc', '-p', 'api/tsconfig.json']);
 
-  const { default: EmbeddedPostgres } = await import(runtime.href);
+  const { default: EmbeddedPostgres } = await import('embedded-postgres');
+  const { createServer: createViteServer } = await import('vite');
   const pg = new EmbeddedPostgres({
     databaseDir,
     port: databasePort,
     user: decodeURIComponent(database.username),
     password: decodeURIComponent(database.password),
+    authMethod: 'scram-sha-256',
     persistent: true,
     autoRehydrateSymlinks: true,
     postgresFlags: ['-c', 'listen_addresses=127.0.0.1'],
@@ -79,9 +141,13 @@ async function start() {
   let api;
   let vite;
   try {
+    if (!existsSync(resolve(databaseDir, 'PG_VERSION'))) await pg.initialise();
+    if (shutdown.signal.aborted) return;
     await pg.start();
     databaseStarted = true;
     console.log('Lion Gym PostgreSQL is running.');
+    if (shutdown.signal.aborted) return;
+    await setupDatabase(pg);
     if (shutdown.signal.aborted) return;
 
     api = spawn(process.execPath, ['dist/api/main.js'], { stdio: 'inherit', windowsHide: true });

@@ -1,8 +1,10 @@
 import { randomBytes } from 'node:crypto';
+import { writeFileSync } from 'node:fs';
 import { normalizeUsername, validUsername, hashPassword } from './credentials.js';
 import { connectDatabase } from './database.js';
 
 const username = normalizeUsername(process.argv[2]);
+const saveLocalCredentials = process.argv[3] === '--save-local-credentials';
 if (!validUsername(username)) throw new Error('Provide a username of 3–64 letters, numbers, dots, underscores or hyphens.');
 
 const db = connectDatabase();
@@ -15,8 +17,13 @@ try {
       throw new Error('An Owner already exists for this installation.');
     }
     await tx.account.create({ data: { username, role: 'OWNER', passwordHash } });
+    if (saveLocalCredentials) {
+      writeFileSync('.local/owner-first-login.txt',
+        `Username: ${username}\nTemporary password: ${temporaryPassword}\nChange the temporary password at first sign-in.\n`,
+        { mode: 0o600 });
+    }
   });
-  console.log('Owner created. Temporary password (shown once):', temporaryPassword);
+  if (!saveLocalCredentials) console.log('Owner created. Temporary password (shown once):', temporaryPassword);
 } finally {
   await db.$disconnect();
 }

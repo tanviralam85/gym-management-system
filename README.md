@@ -4,15 +4,21 @@ Lion Gym is a responsive gym management app. Product rules and the implementatio
 
 ## Local development
 
-If this workspace already has the local PostgreSQL setup, start Lion Gym from the repository root with one command.
+After cloning, open the project folder in VS Code. With Node.js 24 (minimum 24.19.0) and npm 11.17.0 installed, run one command from the repository root.
 
 ```powershell
 npm.cmd run dev
 ```
 
-Wait for **Lion Gym is ready**, then open [the local web app](http://127.0.0.1:5173). Press **Ctrl+C** in the same terminal to stop the web app, API, and local database. Your records stay in `.local/postgres-data`. Stop any separately running Lion Gym processes before using the launcher.
+On macOS or Linux, use `npm run dev`. The first run needs internet access to install the locked dependencies, including the packaged PostgreSQL runtime. The launcher creates a local `.env`, initializes PostgreSQL, applies checked-in migrations, and starts the API and web app. No separate PostgreSQL server or shared database credentials are needed.
 
-### First-time setup or an independently managed database
+Wait for **Lion Gym is ready**, then open [the local web app](http://127.0.0.1:5173). On the first run, open `.local/owner-first-login.txt` in VS Code. Sign in as `lion.owner` with the temporary password from the file and change it when prompted. Keep `.env` and the first-login file private.
+
+Press **Ctrl+C** in the same terminal to stop the services. Windows may ask you to confirm with **Y**. Your data stays in `.local/postgres-data`, and subsequent starts reuse your Owner account. Stop any separately running Lion Gym processes before using the launcher.
+
+The packaged database runtime is supported on [the platforms listed by Embedded Postgres](https://github.com/leinelissen/embedded-postgres#postgresql-versions). Use the manual setup below if your platform needs a separately managed database.
+
+### Independently managed database
 
 Use Node.js 24 (minimum 24.19.0) and npm 11.17.0. Install from the repository root.
 
