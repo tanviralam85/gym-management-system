@@ -1,0 +1,215 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  OWNER
+  STAFF
+  TRAINER
+}
+
+model Account {
+  id                 String    @id @default(uuid())
+  username           String    @unique
+  role               Role
+  passwordHash       String
+  mustChangePassword Boolean   @default(true)
+  disabledAt         DateTime?
+  sessions           Session[]
+  purchases          MembershipPurchase[]
+  payments           Payment[]
+  billingOperations  BillingOperation[]
+  ownerAdjustments   OwnerAdjustment[]
+}
+
+model Session {
+  tokenHash     String   @id
+  accountId     String
+  account       Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  expiresAt     DateTime
+  lastSeenAt    DateTime @default(now())
+
+  @@index([accountId])
+  @@index([expiresAt])
+}
+
+enum PlanDurationUnit {
+  MONTHS
+  DAYS
+}
+
+model Member {
+  id           String   @id @default(uuid())
+  memberNumber Int      @unique @default(autoincrement())
+  fullName     String
+  phone        String
+  dateOfBirth  DateTime? @db.Date
+  gender       String?
+  address      String?
+  emergencyContact String?
+  guardianName String?
+  guardianContact String?
+  createdAt    DateTime @default(now())
+  purchases    MembershipPurchase[]
+  charges      MemberCharge[]
+  payments     Payment[]
+  ownerAdjustments OwnerAdjustment[]
+
+  @@index([phone])
+}
+
+model MembershipPlan {
+  id           String           @id @default(uuid())
+  name         String
+  durationUnit PlanDurationUnit
+  duration     Int
+  pricePaise   Int
+  active       Boolean          @default(true)
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+  purchases    MembershipPurchase[]
+}
+
+enum PaymentMethod {
+  CASH
+  UPI
+}
+
+enum ChargeKind {
+  MEMBERSHIP
+  OPENING_DUES
+}
+
+model MembershipPurchase {
+  id           String           @id @default(uuid())
+  memberId     String
+  member       Member           @relation(fields: [memberId], references: [id])
+  planId       String
+  plan         MembershipPlan   @relation(fields: [planId], references: [id])
+  planName     String
+  pricePaise   Int
+  durationUnit PlanDurationUnit
+  duration     Int
+  startsOn     DateTime         @db.Date
+  expiresOn    DateTime         @db.Date
+  anchorDay    Int
+  businessDate DateTime         @db.Date
+  actorId      String
+  actor        Account          @relation(fields: [actorId], references: [id])
+  createdAt    DateTime         @default(now())
+  charge       MemberCharge?
+  cancellation OwnerAdjustment?
+
+  @@index([memberId, expiresOn])
+}
+
+model MemberCharge {
+  id           Int                 @id @default(autoincrement())
+  memberId     String
+  member       Member              @relation(fields: [memberId], references: [id])
+  purchaseId   String?             @unique
+  purchase     MembershipPurchase? @relation(fields: [purchaseId], references: [id], onDelete: Restrict)
+  kind         ChargeKind
+  label        String
+  amountPaise  Int
+  businessDate DateTime            @db.Date
+  dueDate      DateTime?           @db.Date
+  allocations  PaymentAllocation[]
+
+  @@index([memberId, businessDate, id])
+}
+
+model Payment {
+  receiptNumber Int                 @id @default(autoincrement())
+  memberId      String
+  member        Member              @relation(fields: [memberId], references: [id])
+  actorId       String
+  actor         Account             @relation(fields: [actorId], references: [id])
+  actorUsername String
+  memberName    String
+  memberNumber  Int
+  amountPaise   Int
+  method        PaymentMethod
+  reference     String?
+  balancePaise  BigInt
+  businessDate  DateTime            @db.Date
+  createdAt     DateTime            @default(now())
+  allocations   PaymentAllocation[]
+  supersededBy  OwnerAdjustment? @relation("SupersededReceipt")
+  replacementFor OwnerAdjustment? @relation("ReplacementReceipt")
+  backdatedBy   OwnerAdjustment? @relation("BackdatedReceipt")
+
+  @@index([memberId, receiptNumber])
+  @@index([businessDate, actorId, method])
+}
+
+model PaymentAllocation {
+  receiptNumber Int
+  payment       Payment      @relation(fields: [receiptNumber], references: [receiptNumber])
+  chargeId      Int
+  charge        MemberCharge @relation(fields: [chargeId], references: [id])
+  amountPaise   Int
+  reversals     AllocationReversal[]
+
+  @@id([receiptNumber, chargeId])
+  @@index([chargeId])
+}
+
+model BillingOperation {
+  actorId     String
+  actor       Account  @relation(fields: [actorId], references: [id])
+  key         String
+  requestHash String
+  result      Json
+  createdAt   DateTime @default(now())
+
+  @@id([actorId, key])
+}
+
+enum OwnerAdjustmentKind {
+  CORRECTION
+  BACKDATE
+  REFUND
+  CANCELLATION
+}
+
+model OwnerAdjustment {
+  id             String @id @default(uuid())
+  kind           OwnerAdjustmentKind
+  memberId       String
+  member         Member @relation(fields: [memberId], references: [id])
+  ownerId        String
+  owner          Account @relation(fields: [ownerId], references: [id])
+  reason         String
+  businessDate   DateTime @db.Date
+  createdAt      DateTime @default(now())
+  originalReceiptNumber Int? @unique
+  originalReceipt Payment? @relation("SupersededReceipt", fields: [originalReceiptNumber], references: [receiptNumber], onDelete: Restrict)
+  replacementReceiptNumber Int? @unique
+  replacementReceipt Payment? @relation("ReplacementReceipt", fields: [replacementReceiptNumber], references: [receiptNumber], onDelete: Restrict)
+  backdatedReceiptNumber Int? @unique
+  backdatedReceipt Payment? @relation("BackdatedReceipt", fields: [backdatedReceiptNumber], references: [receiptNumber], onDelete: Restrict)
+  canceledPurchaseId String? @unique
+  canceledPurchase MembershipPurchase? @relation(fields: [canceledPurchaseId], references: [id], onDelete: Restrict)
+  reversals      AllocationReversal[]
+
+  @@index([memberId, createdAt])
+}
+
+model AllocationReversal {
+  adjustmentId  String
+  adjustment    OwnerAdjustment @relation(fields: [adjustmentId], references: [id])
+  receiptNumber Int
+  chargeId      Int
+  allocation    PaymentAllocation @relation(fields: [receiptNumber, chargeId], references: [receiptNumber, chargeId])
+  amountPaise   Int
+  returnMethod  PaymentMethod?
+  returnReference String?
+
+  @@id([adjustmentId, receiptNumber, chargeId])
+  @@index([receiptNumber, chargeId])
+}
